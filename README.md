@@ -170,4 +170,6 @@ certocr/
 
 ## 作者
 
-**Anna** — 欢迎提 Issue / PR 交流改进。
+**Anna** · 个人主页：[www.anna.tf](https://www.anna.tf/)
+
+欢迎提 Issue / PR 交流改进。
