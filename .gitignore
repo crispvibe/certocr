@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+.mypy_cache/
+
+# 本地实验 / 临时脚本（勿提交）
+_exp_*.py
+
+# 测试样本与评测产物（体积大，自行生成）
+test_images/
+
+# 环境变量
+.env
+.env.*
+!.env.example
+
+# IDE / 本地 AI 工具配置
+.idea/
+.vscode/
+.cursor/
+.claude/
+.devin/
+
+# macOS
+.DS_Store
+
+# 日志与临时文件
+*.log
+*.tmp
+*.swp

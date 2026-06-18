@@ -1,0 +1,11 @@
+services:
+  license-ocr:
+    build: .
+    container_name: heyu-license-ocr
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8091:8091"
+    environment:
+      PORT: "8091"
+    volumes:
+      - /www/server/heyu-cy/uploads/file:/www/server/heyu-cy/uploads/file:ro
