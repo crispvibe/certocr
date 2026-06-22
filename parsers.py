@@ -4,6 +4,21 @@ from typing import Any
 
 _LONG_TERM_KEYWORDS = ("长期", "长年", "永久")
 
+# 常见证照 OCR 误识纠正（多字词级，命中即整体替换）。
+# 只收录「几乎不可能是正确文本」的词，避免误伤合法名称/地址。后续可继续追加。
+_OCR_PHRASE_FIXES = {
+    "白由贸易": "自由贸易",  # 自 被误识为 白（自由贸易试验区）
+}
+
+
+def _fix_common_ocr_typos(s: str) -> str:
+    if not s:
+        return s
+    for wrong, right in _OCR_PHRASE_FIXES.items():
+        if wrong in s:
+            s = s.replace(wrong, right)
+    return s
+
 # 营业执照「名称」常见后缀，用于在 OCR 未读到「名称」标签时按行兜底提取商户名称。
 _COMPANY_NAME_SUFFIXES = (
     "有限公司",
@@ -408,6 +423,20 @@ def extract_fields(doc_type: str, lines: list[str]) -> dict[str, Any]:
         # 3) 仍失败（标签丢失/取到水印片段）时，按地址形态全局兜底择最长行。
         if not fields["address"]:
             fields["address"] = _guess_address(lines)
+        # 4) 双栏布局下「经营场所」续行常被「经营范围」打断，地址尾段（如「小区8幢2105室」）
+        #    会孤立在后面的行里，导致地址不完整。若已识别地址未以门牌单位结尾，扫描补回该尾段。
+        if fields["address"] and not fields["address"].rstrip().endswith(tuple("室号楼层幢栋铺")):
+            for raw in lines:
+                ln = (raw or "").strip()
+                if not ln or ln in fields["address"]:
+                    continue
+                if (2 <= len(ln) <= 20 and ln.endswith(tuple("室号楼层幢栋铺"))
+                        and re.search(r"\d", ln)
+                        and not any(n in ln for n in (
+                            "范围", "批准", "项目", "销售", "服务", "经营", "公示",
+                            "年报", "信用", "代码", "登记", "监督"))):
+                    fields["address"] = fields["address"].rstrip() + ln
+                    break
         for pattern in (
             r"法定代表人\s*([\u4e00-\u9fa5·]{2,8})",
             # 个体工商户照面用「经营者」，公司/分支用「负责人」。
@@ -440,6 +469,18 @@ def extract_fields(doc_type: str, lines: list[str]) -> dict[str, Any]:
                 "",
                 fields["name"],
             ).strip()
+        # 双栏布局下「名称」标签常被 OCR 拆行（如「名类」/「称×××有限公司」），值行会
+        # 粘上孤立的「称」「名称」标签残片，去掉名称开头粘连的标签前缀。
+        if fields["name"]:
+            fields["name"] = re.sub(
+                r"^(?:名\s*称|名称|称)[:：、\s]*",
+                "",
+                fields["name"],
+            ).strip()
+        # 名称含「（个体工商户）」等括注时，OCR 常漏掉右括号（如「…工作室（个体工商户」），
+        # 左右括号不成对则补齐右括号。
+        if fields["name"] and fields["name"].count("（") > fields["name"].count("）"):
+            fields["name"] = fields["name"] + "）"
         period = re.search(
             r"(?:营业期限|经营期限|有效期)[:：]?\s*([^\n]+)", text
         )
@@ -475,6 +516,9 @@ def extract_fields(doc_type: str, lines: list[str]) -> dict[str, Any]:
                     fields["is_long_term"] = True
                 else:
                     fields["expired_at"] = _normalize_date(tail)
+        # 常见 OCR 误识纠正（如「白由贸易」→「自由贸易」），应用于名称与地址。
+        fields["name"] = _fix_common_ocr_typos(fields["name"])
+        fields["address"] = _fix_common_ocr_typos(fields["address"])
         return fields
 
     if doc_type == "id_card_front":
