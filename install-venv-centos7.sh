@@ -25,7 +25,7 @@ PIP="${CONDA_PREFIX}/bin/pip"
 
 cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
-Description=Heyu License OCR (RapidOCR)
+Description=Heyu ID Card OCR (RapidOCR)
 After=network.target
 
 [Service]

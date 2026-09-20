@@ -1,195 +1,118 @@
-"""Unit tests for ocr-service/parsers.py — covers the 长期 / expiry-date logic.
+"""Unit tests for parsers.py — 身份证正/反面解析与容错逻辑。
 
 Run with either:
-    python -m pytest ocr-service/test_parsers.py
-    python ocr-service/test_parsers.py
+    python -m pytest test_parsers.py
+    python test_parsers.py
 """
 
-from parsers import extract_fields
+from parsers import _id_check_char, extract_fields
 
 
-def test_business_license_at_long_term():
-    # "至 长期" must NOT write the start date into expired_at (the core bug).
-    f = extract_fields("business_license", ["营业期限 2015年3月12日 至 长期"])
-    assert f["is_long_term"] is True
-    assert f["expired_at"] == ""
-    assert f["valid_from"] == "2015-03-12"
+def _mkid(first17: str) -> str:
+    return first17 + _id_check_char(first17)
 
 
-def test_business_license_two_date_range():
+def test_id_card_front_fields():
+    code = _mkid("11010119900101001")
     f = extract_fields(
-        "business_license", ["营业期限：2015年3月12日 至 2035年3月12日"]
+        "id_card_front",
+        ["姓名 张三", f"公民身份号码 {code}", "住址 北京市朝阳区某街道"],
     )
-    assert f["is_long_term"] is False
-    assert f["valid_from"] == "2015-03-12"
-    assert f["expired_at"] == "2035-03-12"
+    assert f["name"] == "张三"
+    assert f["id_number"] == code
+    assert f["address"] == "北京市朝阳区某街道"
 
 
-def test_business_license_single_end_date():
-    # A lone date AFTER the 至 separator is the expiry.
-    f = extract_fields("business_license", ["有效期 至 2035-03-12"])
-    assert f["is_long_term"] is False
-    assert f["expired_at"] == "2035-03-12"
-
-
-def test_business_license_no_period_keyword_no_guess():
-    # Without a 营业期限/经营期限/有效期 anchor we must NOT grab a stray date
-    # (e.g. the registration / issue date at the bottom of the document).
+def test_id_card_front_name_fallback_no_label():
+    # 「姓名」标签整行丢失时，按版式兜底取顶部首个纯姓名行。
     f = extract_fields(
-        "business_license", ["登记机关 北京市市场监督管理局", "2020年1月1日"]
+        "id_card_front",
+        ["张三", "性别 男", "民族 汉", "住址 北京市朝阳区呼家楼街道东三环12号院3号楼"],
     )
-    assert f["expired_at"] == ""
-    assert f["is_long_term"] is False
+    assert f["name"] == "张三"
 
 
-def test_business_license_name_with_label():
+def test_id_card_front_name_with_inner_space():
+    f = extract_fields("id_card_front", ["姓名 张 三", "公民身份号码 11010119900101001X"])
+    assert f["name"] == "张三"
+
+
+def test_id_card_front_name_strips_merged_gender():
+    f = extract_fields("id_card_front", ["姓名 张三性别 男", "住址 北京市朝阳区某街道"])
+    assert f["name"] == "张三"
+
+
+def test_id_card_front_name_strips_lone_xing():
+    # 「性别」被截断只剩「性」粘到名字尾部。
+    f = extract_fields("id_card_front", ["姓名 王小二性", "住址 北京市朝阳区某街道"])
+    assert f["name"] == "王小二"
+
+
+def test_id_card_front_id_letter_confusion():
+    # 0 被误识为 O：号码位不允许字母，翻译回数字后校验通过。
+    code = _mkid("11010119900101001")
+    broken = "11" + "O" + code[3:]
+    f = extract_fields("id_card_front", ["公民身份号码 " + broken])
+    assert f["id_number"] == code
+
+
+def test_id_card_front_id_digit_single_fix():
+    # 出生日期段误识（日 01→81）使日期非法、校验位修复也过不了：
+    # 唯一能让日期合法 + 校验通过的修正是把 8 纠回 0，即真值。
+    code = _mkid("11010119901101001")  # 出生 1990-11-01
+    broken = code[:12] + "8" + code[13:]
+    f = extract_fields("id_card_front", ["公民身份号码 " + broken])
+    assert f["id_number"] == code
+
+
+def test_id_card_front_id_check_digit_fix():
+    # 校验位本身误识：遍历 11 个合法校验码找回。
+    code = _mkid("11010119900101001")
+    broken = code[:17] + ("5" if code[17] != "5" else "6")
+    f = extract_fields("id_card_front", ["公民身份号码 " + broken])
+    assert f["id_number"] == code
+
+
+def test_id_card_front_id_split_by_space():
+    code = _mkid("11010119900101001")
+    f = extract_fields("id_card_front", ["公民身份号码 " + code[:14] + " " + code[14:]])
+    assert f["id_number"] == code
+
+
+def test_id_card_front_id_no_label():
+    # 标签丢失时按 18 位候选串全局兜底。
+    code = _mkid("11010119900101001")
+    f = extract_fields("id_card_front", ["姓名 张三", "住址 北京市朝阳区某街道", code])
+    assert f["id_number"] == code
+
+
+def test_id_card_front_address_keeps_juminqu():
+    # 含「居民」的地址行（居民区/居委会）不能被水印过滤误删。
     f = extract_fields(
-        "business_license",
-        ["名称 昆明蓝湾科技有限公司", "类型 有限责任公司（自然人独资）"],
-    )
-    assert f["name"] == "昆明蓝湾科技有限公司"
-
-
-def test_business_license_name_suffix_fallback():
-    # OCR 未读到「名称」标签时，按公司后缀兜底；不可把「类型」值当成名称。
-    f = extract_fields(
-        "business_license",
+        "id_card_front",
         [
-            "统一社会信用代码 91530102MAE9601W1Q",
-            "型有限责任公司（自然人独资）",
-            "昆明蓝湾科技有限公司",
-            "成立日期2025年01月22日",
-            "法定代表人 张雪锋",
+            "姓名 张三",
+            "住址 云南省昆明市五华区幸福路",
+            "12号居民区3号楼",
+            "公民身份号码 11010119900101001X",
         ],
     )
-    assert f["name"] == "昆明蓝湾科技有限公司"
+    assert f["address"] == "云南省昆明市五华区幸福路12号居民区3号楼"
 
 
-def test_business_license_type_not_used_as_name():
-    # 只有「类型」行、没有真实名称时，名称应为空而不是「有限责任公司（自然人独资）」。
+def test_id_card_front_id_best_effort_when_unfixable():
+    # 校验不过且单点纠错无解时，仍返回翻译后的候选（best-effort，与老行为一致）。
+    f = extract_fields("id_card_front", ["公民身份号码 99999999999999999O"])
+    assert f["id_number"] == "999999999999999990"
+
+
+def test_id_card_front_address_fallback_no_label():
+    # 住址标签丢失时按地址形态兜底。
     f = extract_fields(
-        "business_license",
-        ["型有限责任公司（自然人独资）", "成立日期2025年01月22日"],
-    )
-    assert f["name"] == ""
-
-
-def test_business_license_founding_date_not_expiry():
-    # 仅有「成立日期」、无「营业期限」关键字时，不得把成立日期写进 expired_at。
-    f = extract_fields(
-        "business_license",
-        ["成立日期2025年01月22日", "住所 云南省昆明市五华区"],
-    )
-    assert f["expired_at"] == ""
-    assert f["valid_from"] == ""
-    assert f["is_long_term"] is False
-
-
-def test_business_license_individual_household():
-    f = extract_fields(
-        "business_license",
-        ["名称 张三餐饮店", "经营者 张三"],
-    )
-    assert f["name"] == "张三餐饮店"
-
-
-def test_business_license_individual_operator():
-    # 个体工商户照面用「经营者」，应能填入 legal_person。
-    f = extract_fields(
-        "business_license",
-        ["名称 北京市弘业餐厅", "类型 个体工商户", "经营者", "孙勇"],
-    )
-    assert f["legal_person"] == "孙勇"
-
-
-def test_business_license_legal_person_split_label():
-    # 双栏竖排把「负责人」拆成「负」「责人」、姓名落到下一行时应兜底补齐。
-    f = extract_fields(
-        "business_license",
-        ["名称 某某分公司", "负", "责人", "覃小花", "成立日期2016年12月09日"],
-    )
-    assert f["legal_person"] == "覃小花"
-
-
-def test_business_license_legal_person_not_label_word():
-    # 标签残片下一行若仍是标签词（如「经营者」），不得误当成姓名。
-    f = extract_fields(
-        "business_license",
-        ["经营者", "个人经营", "注册日期 2004年11月01日"],
-    )
-    assert f["legal_person"] == ""
-
-
-def test_business_license_credit_code_valid_passthrough():
-    # 校验位合法的代码直接采用。
-    f = extract_fields("business_license", ["94JURQ283FQEFLCR6M"])
-    assert f["credit_code"] == "94JURQ283FQEFLCR6M"
-
-
-def test_business_license_credit_code_check_digit_fix():
-    # 8 被误识成禁用字符 S 时，用 GB32100 校验位反推纠回。
-    f = extract_fields("business_license", ["94JURQ2S3FQEFLCR6M"])
-    assert f["credit_code"] == "94JURQ283FQEFLCR6M"
-
-
-def test_business_license_credit_code_prefers_valid_candidate():
-    # 同图多候选（双通道）时，优先采用校验位合法的那个。
-    f = extract_fields(
-        "business_license",
-        ["94JURQ2S3FQEFLCR6M", "94JURQ283FQEFLCR6M"],
-    )
-    assert f["credit_code"] == "94JURQ283FQEFLCR6M"
-
-
-def test_business_license_credit_code_safe_letter_fix():
-    # 不含禁用字符但校验不过时不乱猜；仅含 O/I/Z 时退回安全替换。
-    f = extract_fields("business_license", ["91O102MAE96O1W1ZQ7"])
-    assert "O" not in f["credit_code"] and "I" not in f["credit_code"]
-
-
-def test_business_license_name_strips_trailing_label():
-    # 双栏布局把右栏标签粘到名称尾部时应剥离。
-    f = extract_fields(
-        "business_license",
-        ["名", "称", "深圳卓越餐饮管理（自然人独资）有限公司注册资本"],
-    )
-    assert f["name"] == "深圳卓越餐饮管理（自然人独资）有限公司"
-
-
-def test_business_license_address_fallback_skips_watermark():
-    # 「住所」后紧跟的是水印片段时，应按地址形态兜底挑出真实地址行。
-    f = extract_fields(
-        "business_license",
-        ["住所", "JDGI", "广东省广州市天河区天河路951号", "广州市市场监督管理局"],
+        "id_card_front",
+        ["姓名 张三", "广东省广州市天河区天河路951号", "公民身份号码 11010119900101001X"],
     )
     assert f["address"] == "广东省广州市天河区天河路951号"
-
-
-def test_business_license_address_multiline_join():
-    # 双栏布局把「住所」标签与地址值拆行，且地址跨两行；应多行拼接。
-    f = extract_fields(
-        "business_license",
-        ["住", "所", "云南省昆明市五华区人民中路", "238号华尔顿大厦5楼501室"],
-    )
-    assert f["address"] == "云南省昆明市五华区人民中路238号华尔顿大厦5楼501室"
-
-
-def test_business_license_address_county_without_province():
-    # 少数地址直接以「X县」开头（无省/市），带街路+门牌号时应兜底采信。
-    f = extract_fields(
-        "business_license",
-        ["名称 山西新达科技股份有限公司", "住所", "闻喜县太风西路149号"],
-    )
-    assert f["address"] == "闻喜县太风西路149号"
-
-
-def test_business_license_address_guess_rejects_comma_noise():
-    # 标签丢失时按形态兜底；含逗号的串行噪声（多字段连成一行）不应被采信。
-    f = extract_fields(
-        "business_license",
-        ["名称 某某有限公司", "厂庆阳县城客达政联，二级公路脂城线以北地度2号地，川9，30号"],
-    )
-    assert f["address"] == ""
 
 
 def test_id_card_back_range():
@@ -206,26 +129,73 @@ def test_id_card_back_long_term():
     assert f["valid_from"] == "2018-05-01"
 
 
-def test_id_card_front_fields():
+def test_id_card_back_no_label():
+    # 国徽面除有效期限外无其它日期，标签丢失时全局兜底取区间。
+    f = extract_fields("id_card_back", ["签发机关 昆明市公安局五华分局", "2018.05.01-2038.05.01"])
+    assert f["valid_from"] == "2018-05-01"
+    assert f["expired_at"] == "2038-05-01"
+
+
+def test_id_card_back_long_term_no_label():
+    f = extract_fields("id_card_back", ["签发机关 北京市公安局朝阳分局", "2018.05.01-长期"])
+    assert f["is_long_term"] is True
+    assert f["valid_from"] == "2018-05-01"
+
+
+def test_id_card_back_label_split_line():
+    f = extract_fields("id_card_back", ["有效期限", "2018.05.01-2038.05.01"])
+    assert f["valid_from"] == "2018-05-01"
+    assert f["expired_at"] == "2038-05-01"
+
+
+def test_id_card_back_fullwidth_digits():
+    # 翻拍图 OCR 偶发全角数字/全角分隔符。
+    f = extract_fields("id_card_back", ["有效期限 ２０１８．０５．０１－２０３８．０５．０１"])
+    assert f["valid_from"] == "2018-05-01"
+    assert f["expired_at"] == "2038-05-01"
+
+
+def test_id_card_back_letter_in_date():
+    # 日期里 0 被误识为 O。
+    f = extract_fields("id_card_back", ["有效期限 2O18.O5.O1-2O38.O5.O1"])
+    assert f["valid_from"] == "2018-05-01"
+    assert f["expired_at"] == "2038-05-01"
+
+
+def test_id_card_back_date_before_label():
+    # 日期行排在「有效期限」标签上一行（双栏顺序颠倒）：
+    # 标签后只吃到「限」残片时必须回退全文。
+    f = extract_fields(
+        "id_card_back",
+        ["签发机关 昆明市公安局五华分局", "2020.10.03-长期", "有效期限"],
+    )
+    assert f["is_long_term"] is True
+    assert f["valid_from"] == "2020-10-03"
+
+
+def test_id_card_back_spaced_date():
+    # 翻拍件分隔符后带空格：「2019. 11. 11-2029. 11. 11」。
+    f = extract_fields("id_card_back", ["有效期限", "2019. 11. 11-2029. 11. 11"])
+    assert f["valid_from"] == "2019-11-11"
+    assert f["expired_at"] == "2029-11-11"
+
+
+def test_id_card_front_name_rejects_watermark_fragment():
+    # 「姓名」下一行是误识的水印碎片「证电国」，不能当成姓名；
+    # 真名「谢建国」在标签上方时应由兜底找回。
     f = extract_fields(
         "id_card_front",
-        ["姓名 张三", "公民身份号码 11010119900101001X", "住址 北京市朝阳区某街道"],
+        ["谢建国", "姓名", "证电国", "性别女", "民族", "维吾尔",
+         "住址 上海市浦东新区张江镇科苑路83弄20号2室"],
     )
-    assert f["name"] == "张三"
-    assert f["id_number"] == "11010119900101001X"
-    assert f["address"] == "北京市朝阳区某街道"
+    assert f["name"] == "谢建国"
 
 
-def test_food_license_expiry():
-    f = extract_fields("food_license", ["有效期至 2026年5月1日"])
-    assert f["is_long_term"] is False
-    assert f["expired_at"] == "2026-05-01"
-
-
-def test_food_license_long_term():
-    f = extract_fields("food_license", ["有效期至 长期"])
-    assert f["is_long_term"] is True
-    assert f["expired_at"] == ""
+def test_unsupported_doc_type_returns_empty():
+    # 营业执照等类型已下线：返回统一空字段而不是报错内容。
+    f = extract_fields("business_license", ["名称 某某有限公司", "统一社会信用代码 94JURQ283FQEFLCR6M"])
+    assert f["name"] == ""
+    assert f["credit_code"] == ""
 
 
 if __name__ == "__main__":

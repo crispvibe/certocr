@@ -1,7 +1,7 @@
-# certocr · 中文证照结构化识别服务
+# certocr · 身份证结构化识别服务
 
-> 基于 RapidOCR 的轻量级 HTTP 服务，输入一张证照图片，返回结构化字段（JSON）。
-> 已支持营业执照、身份证正反面、食品经营许可证，开箱即用、本地离线、易于自部署。
+> 基于 RapidOCR 的轻量级 HTTP 服务，输入一张身份证照片（人像面/国徽面），返回结构化字段（JSON）。
+> 本地离线、CPU 可跑、易于自部署。
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-async-009688.svg)](https://fastapi.tiangolo.com/)
@@ -12,38 +12,36 @@
 
 ## 这是什么
 
-很多业务（商家入驻、实名认证、资质审核）都需要把证件照片上的信息录入系统。人工抄录又慢又容易错。
+实名认证、开户审核等业务需要把身份证照片上的信息录入系统，人工抄录又慢又容易错。
 
-这个服务做的事很简单：**给它一张证照图，它把上面的关键字段识别出来，整理成结构化 JSON 返回**，供后台直接回填。
+这个服务做的事很简单：**给它一张身份证照片，它把上面的关键字段识别出来，整理成结构化 JSON 返回**，供后台直接回填。
 
 - 纯本地推理，**不依赖任何云 OCR、不外发图片**，数据不出内网。
 - 模型用的是 RapidOCR（ONNXRuntime），CPU 即可跑，无需 GPU。
-- 针对中文证照版面做了大量**字段解析规则**，不是简单地把文字堆给你，而是直接给到「名称 / 地址 / 法人 / 信用代码 / 有效期」这类可用字段。
+- 针对身份证版面做了**字段解析与纠错规则**：身份证号会走 ISO 7064 校验位反推纠错，姓名/住址/有效期限在标签丢失时也有兜底提取，不是简单地把文字堆给你。
 
-## 支持的证照与输出字段
+## 输出字段
 
-| `doc_type`         | 证照类型       | 主要输出字段                                                       |
-| ------------------ | -------------- | ------------------------------------------------------------------ |
-| `business_license` | 营业执照       | `name` 名称、`address` 住所、`legal_person` 法人、`credit_code` 统一社会信用代码、有效期 |
-| `id_card_front`    | 身份证（人像面）| `name` 姓名、`address` 住址、`id_number` 公民身份号码              |
-| `id_card_back`     | 身份证（国徽面）| `valid_from` / `valid_to` 有效期限、`is_long_term` 是否长期        |
-| `food_license`     | 食品经营许可证 | `name` 名称、`address` 地址、`legal_person` 负责人、有效期         |
+| `doc_type`      | 证照类型        | 主要输出字段                                              |
+| --------------- | --------------- | --------------------------------------------------------- |
+| `id_card_front` | 身份证（人像面）| `name` 姓名、`address` 住址、`id_number` 公民身份号码     |
+| `id_card_back`  | 身份证（国徽面）| `valid_from` / `expired_at` 有效期限、`is_long_term` 是否长期 |
 
 统一返回结构（未识别到的字段为空字符串 / `false`，不会缺键）：
 
 ```json
 {
-  "doc_type": "business_license",
+  "doc_type": "id_card_front",
   "fields": {
-    "name": "某某餐饮服务有限公司",
-    "address": "某省某市某区某路1号",
-    "legal_person": "张三",
-    "credit_code": "91XXXXXXXXXXXXXXXX",
-    "id_number": "",
-    "valid_from": "2020-01-01",
+    "name": "张三",
+    "address": "北京市朝阳区某街道1号",
+    "legal_person": "",
+    "credit_code": "",
+    "id_number": "11010119900101001X",
+    "valid_from": "",
     "valid_to": "",
     "expired_at": "",
-    "is_long_term": true
+    "is_long_term": false
   },
   "raw_text": "……识别到的完整文本……",
   "engine": "RapidOCR"
@@ -52,19 +50,27 @@
 
 ## 识别为什么更准
 
-手机翻拍的证照常有倾斜、反光、淡色水印遮挡，普通 OCR 直接识别召回率不稳。本服务在送入引擎前做了**多通道预处理 + 取并集**：
+手机翻拍的身份证常有倾斜、反光、淡色水印遮挡，普通 OCR 直接识别召回率不稳。本服务做了两层容错：
+
+**送引擎前 —— 多通道预处理 + 取并集：**
 
 1. **自动纠偏**：用 Hough 直线检测估算整页倾角，小角度自动校正（手机翻拍常见的几度倾斜）。
-2. **CLAHE 对比度增强**：提升淡色字体、水印遮挡区域（如营业执照「名称」行）的检测召回。
-3. **多帧并集去重**：原图 + 增强图（+ 纠偏图）分别识别，按行取并集，兼顾常规字段与疑难字段。
-4. **规则化字段解析**：针对中文证照版面（两栏布局、标签换行、长期/永久有效等）做了大量兜底解析，地址续行拼接也会自动剔除页脚提示语。
+2. **CLAHE 对比度增强**：提升淡色字体、水印遮挡区域的检测召回。
+3. **多帧并集去重**：原图 + 增强图（+ 纠偏图）分别识别，按行取并集。
+4. **低召回救回**：常规通道产出过少时，自动追加「放大 + Otsu 二值化」帧再扫一次，专治过暗/模糊/低清的极端翻拍件。
+
+**出引擎后 —— 规则化字段解析 + 校验纠错：**
+
+1. **身份证号校验纠错**：先按标签与 18 位候选定位，形近字母（O/I/S/B 等）自动翻译回数字；校验位不过时先修校验码、再对出生日期段做单点纠错——「校验位通过 + 出生日期合法」双约束，纠得准且几乎不误纠。
+2. **标签丢失兜底**：「姓名」「住址」「有效期限」标签被 OCR 吃掉时，按身份证版式（姓名在顶部、地址形态、国徽面只有一组日期）全局兜底提取。
+3. **版面噪声免疫**：正面底纹「中国 CHINA 居民身份证」水印行自动剔除（带门牌号的「居民区」地址行会保留）；地址跨行自动拼接，水印碎片与孤立单字尾（「房」「室」）都能正确处理；日期容忍全角数字、分隔符空格等常见误识。
 
 ## 快速开始
 
 ```bash
 cd certocr
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python main.py
 ```
@@ -84,14 +90,14 @@ curl http://127.0.0.1:8091/health
 
 ```json
 {
-  "doc_type": "business_license",
+  "doc_type": "id_card_front",
   "image_url": "https://example.com/uploads/xxx.jpg"
 }
 ```
 
 | 字段         | 说明                                                              |
 | ------------ | ----------------------------------------------------------------- |
-| `doc_type`   | 必填，取值见上方表格                                              |
+| `doc_type`   | 必填，`id_card_front` 或 `id_card_back`                           |
 | `image_url`  | 公网可访问的图片地址（http/https），或白名单内的本地相对/绝对路径 |
 | `image_path` | 白名单目录内的本地文件路径（与 `image_url` 二选一）               |
 
@@ -100,7 +106,7 @@ curl http://127.0.0.1:8091/health
 ```bash
 curl -X POST http://127.0.0.1:8091/parse \
   -H "Content-Type: application/json" \
-  -d '{"doc_type":"business_license","image_url":"https://example.com/a.jpg"}'
+  -d '{"doc_type":"id_card_front","image_url":"https://example.com/a.jpg"}'
 ```
 
 ## Docker 部署
@@ -136,22 +142,29 @@ docker compose up -d
 - **下载体积上限**：单张图片限制 15MB，防止被诱导拉取超大响应耗尽资源。
 - **可选内网鉴权**：配置 `HEYU_OCR_TOKEN` 后强制校验请求头令牌。
 
-## 测试
+## 测试与评测
 
 ```bash
 pip install pytest
 pytest test_parsers.py -v
 ```
 
-`test_parsers.py` 覆盖各类证照的字段解析；`eval_*.py`、`gen_*.py` 为离线评测与样本生成脚本，仅用于开发调优。
+`test_parsers.py` 覆盖身份证字段解析与容错规则。`gen_idcards.py` / `eval_idcards.py` 为离线样本生成与识别率评测脚本（仅用于开发调优，样本图自行生成不入库）：
+
+```bash
+python gen_idcards.py 10        # 生成 10 人 × 正反面 × 6 种退化共 120 张测试图
+python eval_idcards.py          # 跑真实 OCR + 解析，输出逐字段识别率
+```
 
 ## 目录结构
 
 ```
 certocr/
 ├── main.py              # FastAPI 入口：图片获取、预处理、OCR、安全校验
-├── parsers.py           # 各类证照的字段解析规则
+├── parsers.py           # 身份证字段解析与容错规则
 ├── test_parsers.py      # 解析单元测试
+├── gen_idcards.py       # 身份证测试图生成（开发用）
+├── eval_idcards.py      # 识别率评测（开发用）
 ├── requirements.txt     # 依赖
 ├── Dockerfile           # 容器构建
 ├── docker-compose.yml   # 一键部署
@@ -162,7 +175,7 @@ certocr/
 
 - **FastAPI + Uvicorn** — 异步 HTTP 服务
 - **RapidOCR (ONNXRuntime)** — 离线 OCR 引擎，CPU 可跑
-- **OpenCV** — 图像预处理（灰度、CLAHE、纠偏）
+- **OpenCV** — 图像预处理（灰度、CLAHE、纠偏、二值化）
 
 ## 开源协议
 
