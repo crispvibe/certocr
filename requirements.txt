@@ -3,3 +3,5 @@ uvicorn[standard]>=0.27.0
 httpx>=0.27.0
 rapidocr-onnxruntime>=1.4.0
 onnxruntime==1.16.3
+# onnxruntime 1.16.x 不兼容 numpy 2.x（导入即崩溃），须锁定 1.x。
+numpy>=1.24,<2

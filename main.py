@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from parsers import extract_fields
 
-app = FastAPI(title="Heyu License OCR", version="1.2.0")
+app = FastAPI(title="Heyu ID Card OCR", version="1.3.0")
 _ocr_engine = None
 _ENGINE_LABEL = "RapidOCR"
 
@@ -124,7 +124,7 @@ class ParseRequest(BaseModel):
     image_path: str = ""
     doc_type: str = Field(
         ...,
-        description="business_license | id_card_front | id_card_back | food_license",
+        description="id_card_front | id_card_back",
     )
 
 
@@ -182,7 +182,7 @@ def _resolve_image(req: ParseRequest) -> tuple[str, bool]:
 
 
 def _enhance(image):
-    """灰度 + CLAHE 对比度增强：提升淡色字体 / 水印遮挡区域（如营业执照「名称」行）的检测召回。"""
+    """灰度 + CLAHE 对比度增强：提升淡色字体 / 水印底纹遮挡区域（如身份证「姓名」行）的检测召回。"""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
@@ -208,7 +208,8 @@ def _estimate_skew(image) -> float:
     if lines is None:
         return 0.0
     angles = []
-    for x1, y1, x2, y2 in lines[:, 0]:
+    # OpenCV 版本间返回形状不一致（(N,1,4) 或 (N,4)），统一 reshape 再解包。
+    for x1, y1, x2, y2 in np.asarray(lines).reshape(-1, 4):  # noqa: PLR2004
         ang = np.degrees(np.arctan2(y2 - y1, x2 - x1))
         if abs(ang) < 20:  # 仅保留近水平线
             angles.append(ang)
@@ -253,7 +254,7 @@ def _run_ocr(image_path: str) -> list[str]:
                 merged.append(text)
         return merged
     # 多通道识别：原图 + CLAHE 增强图（+ 纠偏图，当检测到明显倾斜时），
-    # 按行取并集去重，兼顾常规字段（原图）、淡色/水印遮挡字段（增强图，如「名称」）
+    # 按行取并集去重，兼顾常规字段（原图）、淡色/水印遮挡字段（增强图，如「姓名」）
     # 与倾斜翻拍件（纠偏图）。
     skew = _estimate_skew(image)
     if abs(skew) >= 0.5:
@@ -268,7 +269,21 @@ def _run_ocr(image_path: str) -> list[str]:
         for text in _ocr_lines(ocr, frame):
             if text not in merged:
                 merged.append(text)
+    # 低召回救回：严重欠曝/模糊件常只剩零星几行，追加 Otsu 二值化放大帧再扫一次，
+    # 仅在前面通道几乎无产出时触发，不拖慢正常件。
+    if len(merged) < 5:
+        for text in _ocr_lines(ocr, _binarize(image)):
+            if text not in merged:
+                merged.append(text)
     return merged
+
+
+def _binarize(image):
+    """放大 + Otsu 二值化：极端退化图（过暗/低清）下增强文字边缘，提升召回。"""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    up = cv2.resize(gray, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
+    _, bw = cv2.threshold(up, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return cv2.cvtColor(bw, cv2.COLOR_GRAY2BGR)
 
 
 @app.get("/health")
@@ -277,13 +292,11 @@ def health():
 
 
 @app.post("/parse", response_model=ParseResponse)
-def parse_license(req: ParseRequest, x_internal_token: Optional[str] = Header(default=None)):
+def parse_document(req: ParseRequest, x_internal_token: Optional[str] = Header(default=None)):
     _require_internal_token(x_internal_token)
     allowed = {
-        "business_license",
         "id_card_front",
         "id_card_back",
-        "food_license",
     }
     if req.doc_type not in allowed:
         raise HTTPException(status_code=400, detail="doc_type 无效")

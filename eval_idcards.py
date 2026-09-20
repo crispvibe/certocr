@@ -54,7 +54,7 @@ def evaluate(variant_filter=None):
 
     print(f"评测 {len(images)} 张身份证图 ...\n")
     for idx, img in enumerate(images, 1):
-        gt = json.loads(img.with_suffix(".json").read_text())
+        gt = json.loads(img.with_suffix(".json").read_text(encoding="utf-8"))
         doc_type = gt["doc_type"]
         side = "front" if doc_type == "id_card_front" else "back"
         fields = FIELDS_FRONT if side == "front" else FIELDS_BACK
@@ -120,7 +120,8 @@ def evaluate(variant_filter=None):
         "overall_field_rate": round(total_c / total_t, 4),
         "details": details,
     }
-    (GEN_DIR / "_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    (GEN_DIR / "_report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n明细已写入 {GEN_DIR / '_report.json'}")
     return report
 

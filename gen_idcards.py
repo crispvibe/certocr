@@ -15,9 +15,32 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageEnhance
 
 OUT_DIR = Path(__file__).parent / "test_images" / "idcards"
 
-FONT_HEI = "/System/Library/Fonts/STHeiti Medium.ttc"
-FONT_HEI_L = "/System/Library/Fonts/STHeiti Light.ttc"
-FONT_SONG = "/System/Library/Fonts/Supplemental/Songti.ttc"
+
+def _pick_font(candidates: list[str]) -> str:
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    raise RuntimeError(f"找不到可用中文字体: {candidates}")
+
+
+FONT_HEI = _pick_font([
+    "/System/Library/Fonts/STHeiti Medium.ttc",     # macOS
+    "C:/Windows/Fonts/msyh.ttc",                    # Windows 微软雅黑
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", # Linux 文泉驿
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+])
+FONT_HEI_L = _pick_font([
+    "/System/Library/Fonts/STHeiti Light.ttc",
+    "C:/Windows/Fonts/msyhl.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    FONT_HEI,
+])
+FONT_SONG = _pick_font([
+    "/System/Library/Fonts/Supplemental/Songti.ttc",
+    "C:/Windows/Fonts/simsun.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+    FONT_HEI,
+])
 
 _SURNAMES = list("王李张刘陈杨黄赵周吴徐孙马朱胡郭何高林郑谢罗唐宋")
 _GIVEN = ["伟", "芳", "娜", "敏", "静", "强", "磊", "军", "洋", "勇", "艳", "杰",
@@ -191,10 +214,13 @@ def main(n=15, seed=20260618):
                 if v != "clean":
                     degrade(base, v, out)
                 out.with_suffix(".json").write_text(
-                    json.dumps({**rec, "variant": v}, ensure_ascii=False, indent=2))
+                    json.dumps({**rec, "variant": v}, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
                 count += 1
     print(f"generated {count} id-card images for {n} persons -> {OUT_DIR}")
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    n = int(sys.argv[1]) if len(sys.argv) > 1 else 15
+    main(n=n)
